@@ -268,12 +268,14 @@ with tabs[1]:
              help="Heat capture capex avoided because storage covers peaks")
     c.metric("Annual savings", f"${(sv['annual_steam_savings'] + sv['annual_floor_value'])/1e3:,.0f}K", border=True,
              help="Avoided steam purchases, plus floor space value if credited")
-    e.metric("Storage payback", "n/a" if not np.isfinite(sv["payback_years"]) else f"{sv['payback_years']:.1f} yr",
-             border=True)
     if real_mode:
-        st.caption("On the real dorm load, \"capture avoided\" assumes a no-storage design sized to the 99th percentile "
-                   "winter peak. Storage cannot replace that capture through weeks of winter demand above capture, so "
-                   "read this payback with caution.")
+        e.metric("Storage payback", "Not meaningful for this load shape (see caption)", border=True)
+        st.caption("Storage payback is not shown for the real dorm load: \"capture avoided\" assumes a no-storage design "
+                   "sized to the 99th percentile winter peak, but storage cannot replace that capture through weeks of "
+                   "winter demand above capture.")
+    else:
+        e.metric("Storage payback", "n/a" if not np.isfinite(sv["payback_years"]) else f"{sv['payback_years']:.1f} yr",
+                 border=True)
 
 with tabs[2]:
     st.markdown("A gradient-boosted model forecasts hourly heat demand a day ahead from calendar features, "
