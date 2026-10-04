@@ -87,6 +87,10 @@ def outage_mask(index, hours=200, event_len=8, seed=2):
 
 
 # ---------------------------------------------------------------- storage
+CONDENSER_F = 90.0  # ASSUMPTION: typical condenser water leaving chillers; verify by metering
+WATER_TANK_LOW_F = 65.0  # ASSUMPTION: lowest tank temp still useful to the loop on the condenser side
+
+
 @dataclass
 class Storage:
     kind: str = "pcm"              # none | water | pcm
@@ -98,13 +102,23 @@ class Storage:
     approach_f: float = 3.0        # ASSUMPTION: min temperature difference for heat transfer
     placement: str = "condenser"   # condenser (hot side, our fix) | loop (as in original brief)
     pcm_kwh_per_m3: float = 50.0   # brief: 12 MWh in 240 m3
-    water_kwh_per_m3: float = 6.5  # brief: 1.16 kWh/m3/C x 5.6 C swing
     height_m: float = 3.05
+
+    def water_swing_c(self):
+        """Usable temperature swing of a water tank at this placement.
+        Loop side: brief's 10 F (5.6 C) supply/return swing.
+        Condenser side: charged at condenser temp minus approach, drawn down to WATER_TANK_LOW_F."""
+        if self.placement == "loop":
+            return 10 / 1.8
+        return (CONDENSER_F - self.approach_f - WATER_TANK_LOW_F) / 1.8
+
+    def water_kwh_per_m3(self):
+        return 1.16 * self.water_swing_c()  # brief: water holds 1.16 kWh/m3 per C
 
     def volume_m3(self):
         if self.kind == "none":
             return 0.0
-        d = self.pcm_kwh_per_m3 if self.kind == "pcm" else self.water_kwh_per_m3
+        d = self.pcm_kwh_per_m3 if self.kind == "pcm" else self.water_kwh_per_m3()
         return self.capacity_mwh * 1000 / d
 
     def footprint_sqft(self):
@@ -116,9 +130,6 @@ def loop_supply_f(index):
     ASSUMPTION: seasonal sinusoid between those bounds, coldest late January."""
     doy = index.dayofyear.values - 1
     return 75.5 - 21.5 * np.cos(2 * np.pi * (doy - 20) / 365)
-
-
-CONDENSER_F = 90.0  # ASSUMPTION: typical condenser water leaving chillers; verify by metering
 
 
 def temperature_windows(index, st, outage):

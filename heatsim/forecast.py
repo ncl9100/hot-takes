@@ -22,6 +22,15 @@ def features(demand, temp):
     return X
 
 
+def profile_forecast(demand, window=28):
+    """Non-ML baseline: mean of the same hour and day type (weekday/weekend) over the
+    previous `window` occurrences. Uses only data at least 24 h old, so it is day-ahead."""
+    idx = demand.index
+    key = idx.hour + 24 * (idx.dayofweek >= 5)
+    out = demand.groupby(key).transform(lambda s: s.shift(1).rolling(window, min_periods=1).mean())
+    return out.bfill().rename("profile_mw")
+
+
 def train_and_forecast(test_demand, test_weather, avg_source_mw=1.0, space_heat_share=0.0,
                        peak_ratio=1.64, n_train_years=3):
     """Train on independent synthetic years, evaluate on the simulation year.
@@ -38,12 +47,14 @@ def train_and_forecast(test_demand, test_weather, avg_source_mw=1.0, space_heat_
     pred = pd.Series(model.predict(Xt), index=test_demand.index, name="forecast_mw")
     y = test_demand.values
     persist = test_demand.shift(24).bfill().values
+    profile = profile_forecast(test_demand)
     metrics = {
         "ml_mape": float(np.mean(np.abs(pred.values - y) / y)),
         "persistence_mape": float(np.mean(np.abs(persist - y) / y)),
+        "profile_mape": float(np.mean(np.abs(profile.values - y) / y)),
         "ml_mae_mw": float(np.mean(np.abs(pred.values - y))),
     }
-    return pred, metrics
+    return pred, profile, metrics
 
 
 def forward_sum(x, hours):
@@ -52,11 +63,18 @@ def forward_sum(x, hours):
     return s[::-1].rolling(hours, min_periods=1).sum()[::-1].values
 
 
-def reserve_policies(demand, forecast, ride_through_h=8, margin=0.10):
-    """Three ways to decide how much energy to hold back for outages."""
-    return {
-        "Fixed worst case (no forecast)": np.full(len(demand), ride_through_h * np.percentile(demand, 99)),
-        "ML forecast": forward_sum(forecast, ride_through_h) * (1 + margin),
-        "Perfect foresight (upper bound)": forward_sum(demand, ride_through_h),
-        "No reserve": np.zeros(len(demand)),
-    }
+POLICY_NAMES = ["Fixed worst case (no forecast)", "ML forecast", "Hour-of-day profile (no ML)",
+                "Perfect foresight (upper bound)", "No reserve"]
+
+
+def reserve_policies(demand, forecast, profile, ride_through_h=8, margin=0.10):
+    """Ways to decide how much energy to hold back for outages (MWh, before the
+    simulation caps it at storage capacity). margin is an ASSUMPTION safety factor."""
+    n = len(demand)
+    return dict(zip(POLICY_NAMES, [
+        np.full(n, ride_through_h * np.percentile(demand, 99)),
+        forward_sum(forecast, ride_through_h) * (1 + margin),
+        forward_sum(profile, ride_through_h) * (1 + margin),
+        forward_sum(demand, ride_through_h),
+        np.zeros(n),
+    ]))
