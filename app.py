@@ -45,6 +45,7 @@ from heatsim.model import (synth_weather, synth_demand, outage_mask, Storage, si
 from heatsim.forecast import train_and_forecast, reserve_policies, POLICY_NAMES  # noqa: E402
 from heatsim import finance as fin  # noqa: E402
 import json  # noqa: E402
+from pathlib import Path  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 import assistant  # noqa: E402
 from assistant import ASSUMPTIONS_MD  # noqa: E402
@@ -132,6 +133,27 @@ def base_data(avg, sh, outage_h):
     o = outage_mask(d.index, hours=outage_h)
     pred, profile, metrics = train_and_forecast(d, w, avg_source_mw=avg, space_heat_share=sh)
     return w, d, o, pred, profile, metrics
+
+
+@st.cache_data
+def real_results():
+    """Forecast error on real BDG2 dorm steam meters, precomputed by scripts/real_data_validation.py.
+    Returns None if the CSV is missing, so the app never downloads or trains for this."""
+    try:
+        r = pd.read_csv(Path(__file__).parent / "data" / "real_steam_results.csv").dropna(subset=["ml_wape"])
+    except (OSError, KeyError, pd.errors.ParserError):
+        return None
+    cols = ["ml_wape", "persistence_wape", "profile_wape"]
+    summed = r[r.series.str.contains("summed")]
+    ind = r[~r.series.str.contains("summed")]
+    rows = [{"Series": s.series.replace(" all lodging", " dorms").replace(" bldgs summed", " meters summed"),
+             **{c: getattr(s, c) for c in cols}} for s in summed.itertuples()]
+    rows.append({"Series": f"Median of {len(ind)} individual dorms", **ind[cols].median().to_dict()})
+    out = pd.DataFrame(rows)
+    for c in cols:
+        out[c] = out[c].map("{:.3f}".format)
+    return out.rename(columns={"ml_wape": "Our ML", "persistence_wape": "Same as yesterday",
+                               "profile_wape": "Hour-of-day profile"})
 
 
 w, d, o, pred, profile, metrics = base_data(avg, sh, outage_h)
@@ -261,6 +283,14 @@ with tabs[2]:
     st.caption("SYNTHETIC: the model is trained and tested on synthetic years calibrated to the brief, so forecast "
                "errors mostly reflect the noise we injected. Replace with metered Fulton hot water data and NOAA "
                "weather before any real decision.")
+    real = real_results()
+    if real is not None:
+        st.subheader("Tested on real metered data")
+        st.dataframe(real, hide_index=True, width="stretch")
+        st.caption("Forecast error as WAPE (total absolute error / total load; lower is better), from "
+                   "scripts/real_data_validation.py on Building Data Genome 2. Hourly metered dorm steam, which "
+                   "includes space heating, so these are not NYCHA apartments. Trained on 2016, tested day-ahead on "
+                   "2017. The reserve-policy comparison above still uses synthetic data.")
 
 with tabs[3]:
     a, b, c, e = st.columns(4)
