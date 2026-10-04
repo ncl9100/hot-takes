@@ -48,13 +48,40 @@ def train_and_forecast(test_demand, test_weather, avg_source_mw=1.0, space_heat_
     y = test_demand.values
     persist = test_demand.shift(24).bfill().values
     profile = profile_forecast(test_demand)
-    metrics = {
-        "ml_mape": float(np.mean(np.abs(pred.values - y) / y)),
-        "persistence_mape": float(np.mean(np.abs(persist - y) / y)),
-        "profile_mape": float(np.mean(np.abs(profile.values - y) / y)),
-        "ml_mae_mw": float(np.mean(np.abs(pred.values - y))),
+    return pred, profile, _errors(y, pred.values, persist, profile.values)
+
+
+def _errors(y, ml, persist, profile, mape_min=0.0):
+    """Forecast errors. MAPE skips hours with y <= mape_min, where it is undefined or explodes."""
+    m = y > mape_min
+    mape = lambda p: float(np.mean(np.abs(p[m] - y[m]) / y[m]))
+    return {
+        "ml_mape": mape(ml),
+        "persistence_mape": mape(persist),
+        "profile_mape": mape(profile),
+        "ml_mae_mw": float(np.mean(np.abs(ml - y))),
+        "ml_wape": float(np.abs(ml - y).sum() / y.sum()),
+        "persistence_wape": float(np.abs(persist - y).sum() / y.sum()),
+        "profile_wape": float(np.abs(profile - y).sum() / y.sum()),
     }
-    return pred, profile, metrics
+
+
+def train_and_forecast_real(demand, temp, observed, test_year=2017):
+    """Real metered load: train on the years before test_year (observed hours only) and
+    forecast test_year a day ahead. demand/temp cover all years; gap-filled hours are
+    used for lag features but excluded from training and from the error metrics."""
+    X = features(demand, temp)
+    test = demand.index.year == test_year
+    train = (demand.index.year < test_year) & observed
+    model = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, random_state=0)
+    model.fit(X[train], demand[train])
+    pred = pd.Series(model.predict(X[test]), index=demand.index[test], name="forecast_mw")
+    profile = profile_forecast(demand)[test]
+    persist = demand.shift(24)[test]
+    ok = observed[test]
+    y = demand[test].values[ok]
+    # MAPE skips hours under 10% of mean load, as in scripts/real_data_validation.py; WAPE uses all hours
+    return pred, profile, _errors(y, pred.values[ok], persist.values[ok], profile.values[ok], mape_min=0.1 * y.mean())
 
 
 def forward_sum(x, hours):

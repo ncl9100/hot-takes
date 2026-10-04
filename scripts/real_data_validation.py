@@ -7,7 +7,8 @@ Trained on 2016, tested day-ahead on 2017.
 
 Run from the repo root:  .venv\\Scripts\\python scripts/real_data_validation.py
 Raw files are downloaded once into data/raw/ (gitignored, never committed).
-Writes data/real_steam_results.csv.
+Writes data/real_steam_results.csv (forecast errors) and data/real_demand_cockatoo.csv
+(hourly summed steam for the 7 Cockatoo dorms plus site air temperature, 2016-2017).
 """
 import sys
 import urllib.request
@@ -95,3 +96,26 @@ print("\nIndividual buildings, median:", ind[["ml_wape","profile_wape","persiste
 print("ML beats profile (WAPE) in", (ind.ml_wape < ind.profile_wape).sum(), "of", len(ind))
 df.to_csv(OUT, index=False)
 print("Wrote", OUT)
+
+
+# ---- Real load shape for the app's "Real metered shape (BDG2 dorms)" option.
+# The app simulates 2017 and trains its forecast on 2016, so both years are saved.
+# Raw BDG2 meter units; the app only uses the shape and rescales it to the demand slider.
+site = "Cockatoo"
+ids = meta[(meta.site_id == site) & meta.primaryspaceusage.str.contains("Lodging", na=False) & meta.steam.notna()].building_id
+good = [c for c in ids if c in steam.columns and steam[c].notna().mean() > 0.9 and (steam[c] > 0).mean() > 0.8]
+idx = pd.date_range("2016-01-01", "2017-12-31 23:00", freq="h")
+raw = steam[good].sum(axis=1, min_count=len(good)).reindex(idx)
+raw[raw == 0] = np.nan  # ASSUMPTION: all meters reading exactly 0 together is a data dropout, not zero load
+filled = raw.isna()
+s = raw.interpolate(limit=6, limit_area="inside")  # short gaps, as in the validation above
+weekly = pd.concat([s.shift(168), s.shift(-168)], axis=1).mean(axis=1)
+s = s.fillna(weekly).interpolate().ffill().bfill()  # ASSUMPTION: long gaps take the same hour a week before/after
+temp = wx[wx.site_id == site].set_index("timestamp")["airTemperature"]
+temp = temp[~temp.index.duplicated()].reindex(idx).interpolate(limit=12).ffill().bfill()
+shape = pd.DataFrame({"steam_meter": s.round(1), "temp_c": temp.round(1), "filled": filled.astype(int)},
+                     index=idx.rename("timestamp"))
+SHAPE_OUT = ROOT / "data" / "real_demand_cockatoo.csv"
+shape.to_csv(SHAPE_OUT)
+print(f"Wrote {SHAPE_OUT} ({SHAPE_OUT.stat().st_size / 1e6:.2f} MB, {len(good)} dorms, "
+      f"{int(filled[idx.year == 2017].sum())} of 8760 hours in 2017 filled)")

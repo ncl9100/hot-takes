@@ -85,6 +85,7 @@ assistant.py            "Ask ChelseaHeat" assistant: tools, system prompt, assum
 heatsim/model.py        Synthetic weather and demand, outages, storage physics, hourly dispatch
 heatsim/forecast.py     Day-ahead demand forecast and outage reserve policies
 heatsim/finance.py      Capex, NPV, cost of heat, customer bills, CO2, water
+heatsim/realdata.py     Loads the real dorm load shape (optional sidebar choice)
 scripts/real_data_validation.py  Forecast test on real BDG2 dorm steam meters
 data/                   Real-data results (raw downloads in data/raw/ are gitignored)
 docs/                   Team research brief, organizer materials review, judging criteria,
@@ -139,6 +140,8 @@ Caveats:
 - The reserve-policy results above still use synthetic data.
 
 Reproduce with `.venv\Scripts\python scripts/real_data_validation.py`. It downloads the raw BDG2 files into `data/raw/` (gitignored, never committed) and writes `data/real_steam_results.csv`, which the app's ML tab reads. The app itself never downloads or trains on this data.
+
+**Run the model on a real load shape.** The sidebar's "Demand data" choice switches from the synthetic default to "Real metered shape (BDG2 dorms)": hourly summed steam for the 7 Cockatoo dorms in 2017, with that site's air temperature, rescaled to the average-demand slider (our assumption: the shape scales linearly). The forecast then trains on the same dorms' 2016 data. This is dorm heating plus hot water, not NYCHA data, so results differ from the synthetic numbers above, which are what our deck and this README quote. The data is in `data/real_demand_cockatoo.csv` (gaps filled as described in the script; a `filled` column marks them). The "Ask ChelseaHeat" assistant always uses the synthetic data.
 
 Dataset: Miller, C., Kathirgamanathan, A., Picchetti, B. et al. *The Building Data Genome Project 2, energy meter data from the ASHRAE Great Energy Predictor III competition.* Sci Data 7, 368 (2020). https://doi.org/10.1038/s41597-020-00712-x. Data from [github.com/buds-lab/building-data-genome-project-2](https://github.com/buds-lab/building-data-genome-project-2), licensed CC BY-SA (Creative Commons Attribution-ShareAlike; see that repo's LICENSE). Files in `data/` derived from it are shared under the same license.
 

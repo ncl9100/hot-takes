@@ -4,6 +4,12 @@ import streamlit as st
 from intro import INTRO_HTML
 
 st.set_page_config(page_title="ChelseaHeat: Data Center Heat to NYCHA", layout="wide")
+SYNTH_OPT, REAL_OPT = "Synthetic (default)", "Real metered shape (BDG2 dorms)"
+BADGE = ('<span class="ch-badge" title="Demand shape and weather from metered dorm steam in Building Data Genome 2, '
+         'scaled to our size; not NYCHA data">REAL DORM LOAD SHAPE</span>'
+         if st.session_state.get("demand_source") == REAL_OPT else
+         '<span class="ch-badge" title="Demand and weather are synthetic profiles calibrated to the brief&#39;s '
+         'figures; see README">SYNTHETIC DATA</span>')
 st.markdown("""
 <style>
   .block-container {padding-top: 3.6rem;}
@@ -17,9 +23,9 @@ st.markdown("""
   [data-testid="stMetricValue"] div {overflow: visible; text-overflow: clip;}
 </style>
 <div class="ch-head"><h1>ChelseaHeat</h1>
-  <span class="ch-badge" title="Demand and weather are synthetic profiles calibrated to the brief's figures; see README">SYNTHETIC DATA</span></div>
+  __BADGE__</div>
 <p class="ch-sub">Data center heat from 111 8th Ave, stored in a phase change battery, delivered to the Fulton Houses rebuild via Con Ed's Chelsea loop.</p>
-""", unsafe_allow_html=True)
+""".replace("__BADGE__", BADGE), unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -42,7 +48,8 @@ import altair as alt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from heatsim.model import (synth_weather, synth_demand, outage_mask, Storage, simulate, summarize)  # noqa: E402
-from heatsim.forecast import train_and_forecast, reserve_policies, POLICY_NAMES  # noqa: E402
+from heatsim.forecast import train_and_forecast, train_and_forecast_real, reserve_policies, POLICY_NAMES  # noqa: E402
+from heatsim import realdata  # noqa: E402
 from heatsim import finance as fin  # noqa: E402
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -51,11 +58,17 @@ import assistant  # noqa: E402
 from assistant import ASSUMPTIONS_MD  # noqa: E402
 
 with st.sidebar:
+    if realdata.available():
+        st.radio("Demand data", [SYNTH_OPT, REAL_OPT], key="demand_source",
+                 help="Real: hourly metered steam for 7 dorms (Building Data Genome 2, 2017), heating plus hot water, "
+                      "rescaled to the average demand below. Not NYCHA data.")
+    real_mode = st.session_state.get("demand_source") == REAL_OPT and realdata.available()
     with st.expander("System", expanded=True):
         capture = st.slider("Heat capture capacity (MW)", 0.5, 3.0, 1.5, 0.1)
         avg = st.slider("Average heat demand, source side (MW)", 0.3, 2.0, 1.0, 0.1)
-        sh = st.slider("Space heating share of load", 0.0, 0.6, 0.0, 0.05,
-                       help="0 = hot water only, the brief's anchor load")
+        sh = st.slider("Space heating share of load", 0.0, 0.6, 0.0, 0.05, disabled=real_mode,
+                       help="Not used with the real load shape, which already includes space heating" if real_mode
+                       else "0 = hot water only, the brief's anchor load")
     with st.expander("Storage", expanded=True):
         kind = st.selectbox("Storage technology", ["pcm", "water", "none"],
                             format_func={"pcm": "Phase change (salt hydrate)", "water": "Water tank", "none": "No storage"}.get)
@@ -156,7 +169,16 @@ def real_results():
                                "profile_wape": "Hour-of-day profile"})
 
 
-w, d, o, pred, profile, metrics = base_data(avg, sh, outage_h)
+@st.cache_data
+def real_base_data(avg, outage_h):
+    """Real dorm load shape scaled to avg (ASSUMPTION: linear scaling); forecast trained on 2016, run on 2017."""
+    w, d, d_all, t_all, observed = realdata.load(avg)
+    o = outage_mask(d.index, hours=outage_h)
+    pred, profile, metrics = train_and_forecast_real(d_all, t_all, observed, test_year=realdata.SIM_YEAR)
+    return w, d, o, pred, profile, metrics
+
+
+w, d, o, pred, profile, metrics = real_base_data(avg, outage_h) if real_mode else base_data(avg, sh, outage_h)
 store = Storage(kind=kind, capacity_mwh=cap_mwh if kind != "none" else 0.0, power_mw=store_mw,
                 melt_f=melt, placement=placement)
 policies = reserve_policies(d, pred.values, profile.values, ride_through_h=ride)
@@ -175,6 +197,11 @@ if intro_start is not None:
     time.sleep(max(0.0, 1.0 - (time.perf_counter() - intro_start)))  # 1 s minimum so the animation doesn't flash
     intro.empty()
 
+if real_mode:
+    st.warning("**Real load shape on.** Demand is the real hourly steam load of 7 college dorms (Building Data Genome 2, "
+               "2017: space heating plus hot water) with that site's air temperature, scaled to the average demand "
+               "slider. It is not metered NYCHA data, and results differ from our deck and README, which use the "
+               "synthetic default.")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("DC heat share", f"{s['network_share']:.1%}", border=True,
           help="Share of hot water load served by data center heat (directly or via storage)")
@@ -195,7 +222,7 @@ with tabs[0]:
     st.subheader("Heat balance (MW, source side)")
     chart(sl[["demand", "dc_supply", "discharge", "steam"]].rename(columns={
         "demand": "Demand", "dc_supply": "Data center supply", "discharge": "Storage discharge", "steam": "Steam backup"}),
-        y_title="MW", caption="Hour by hour for the selected week: the dashed line is hot water demand, blue is the "
+        y_title="MW", caption=f"Hour by hour for the selected week: the dashed line is {'heat' if real_mode else 'hot water'} demand, blue is the "
         "heat the data center can supply, and orange and gray show storage and steam filling any gap.")
     st.subheader("Storage state of charge (MWh)")
     chart(sl["soc_mwh"].rename("State of charge"), kind="area", y_title="MWh",
@@ -243,6 +270,10 @@ with tabs[1]:
              help="Avoided steam purchases, plus floor space value if credited")
     e.metric("Storage payback", "n/a" if not np.isfinite(sv["payback_years"]) else f"{sv['payback_years']:.1f} yr",
              border=True)
+    if real_mode:
+        st.caption("On the real dorm load, \"capture avoided\" assumes a no-storage design sized to the 99th percentile "
+                   "winter peak. Storage cannot replace that capture through weeks of winter demand above capture, so "
+                   "read this payback with caution.")
 
 with tabs[2]:
     st.markdown("A gradient-boosted model forecasts hourly heat demand a day ahead from calendar features, "
@@ -250,17 +281,19 @@ with tabs[2]:
                 "back for the next ride-through hours) cuts steam compared with simpler rules, including holding "
                 "no reserve at all.")
     a, b, c, e = st.columns(4)
-    a.metric("ML error (MAPE)", f"{metrics['ml_mape']:.1%}", border=True,
-             help="Mean absolute percentage error of the gradient-boosted day-ahead forecast")
-    b.metric("Profile error", f"{metrics['profile_mape']:.1%}", border=True,
-             help="Hour-of-day average profile, no ML (MAPE)")
-    c.metric("Naive error", f"{metrics['persistence_mape']:.1%}", border=True,
-             help="Naive 'same as yesterday' forecast (MAPE)")
+    err, err_name = ("wape", "WAPE") if real_mode else ("mape", "MAPE")
+    a.metric(f"ML error ({err_name})", f"{metrics['ml_' + err]:.1%}", border=True,
+             help="WAPE (total absolute error / total load) of the day-ahead forecast, on metered 2017 hours"
+             if real_mode else "Mean absolute percentage error of the gradient-boosted day-ahead forecast")
+    b.metric("Profile error", f"{metrics['profile_' + err]:.1%}", border=True,
+             help=f"Hour-of-day average profile, no ML ({err_name})")
+    c.metric("Naive error", f"{metrics['persistence_' + err]:.1%}", border=True,
+             help=f"Naive 'same as yesterday' forecast ({err_name})")
     e.metric("ML error (MAE)", f"{metrics['ml_mae_mw']*1000:.0f} kW", border=True, help="ML mean absolute error")
     sl = slice((week - 1) * 168, week * 168)
     st.subheader("Day-ahead demand forecast (MW, source side)")
     chart(pd.DataFrame({"Actual": d.iloc[sl], "ML forecast": pred.iloc[sl], "Profile (no ML)": profile.iloc[sl]}),
-          y_title="MW", caption="Forecasts against actual (synthetic) demand for the week chosen on the first tab: "
+          y_title="MW", caption=f"Forecasts against actual ({'real dorm' if real_mode else 'synthetic'}) demand for the week chosen on the first tab: "
           "the closer a line tracks the solid dark one, the better the forecast.")
     rows = []
     for name, r in policies.items():
@@ -273,16 +306,23 @@ with tabs[2]:
     st.dataframe(pol, hide_index=True, width="stretch")
     best = pol.loc[pol["Total steam (MWh)"].idxmin(), "Reserve policy"]
     fixed = policies[POLICY_NAMES[0]][0]
-    st.markdown(f"**Finding:** at these settings **{best}** gives the least steam. The fixed worst-case rule asks for "
-                f"{fixed:.1f} MWh, {'more than' if fixed > store.capacity_mwh else 'up to'} the {store.capacity_mwh:.0f} MWh "
-                "battery, so it blocks most peak shaving. At the default settings capture exceeds average demand, "
-                "so the battery is usually full when an outage starts and holding a reserve costs more steam in "
-                "normal hours than it saves during outages. On hot-water-only load the ML forecast is barely more accurate than the hour-of-day "
-                "profile. With space heating the load becomes weather-driven and the ML forecast is far more accurate "
-                "(try the slider), but a better forecast still does not turn into less steam while no reserve wins.")
-    st.caption("SYNTHETIC: the model is trained and tested on synthetic years calibrated to the brief, so forecast "
-               "errors mostly reflect the noise we injected. Replace with metered Fulton hot water data and NOAA "
-               "weather before any real decision.")
+    if real_mode:
+        st.markdown(f"**On the real dorm load shape at these settings, {best}** gives the least steam. The fixed "
+                    f"worst-case rule asks for {fixed:.1f} MWh against the {store.capacity_mwh:.0f} MWh battery. "
+                    "The findings in our deck and README come from the synthetic default.")
+        st.caption("REAL LOAD SHAPE: the forecast is trained on 2016 and tested day-ahead on 2017 metered dorm steam "
+                   "(heating plus hot water, scaled to our size), not NYCHA data. Errors are WAPE on metered hours.")
+    else:
+        st.markdown(f"**Finding:** at these settings **{best}** gives the least steam. The fixed worst-case rule asks for "
+                    f"{fixed:.1f} MWh, {'more than' if fixed > store.capacity_mwh else 'up to'} the {store.capacity_mwh:.0f} MWh "
+                    "battery, so it blocks most peak shaving. At the default settings capture exceeds average demand, "
+                    "so the battery is usually full when an outage starts and holding a reserve costs more steam in "
+                    "normal hours than it saves during outages. On hot-water-only load the ML forecast is barely more accurate than the hour-of-day "
+                    "profile. With space heating the load becomes weather-driven and the ML forecast is far more accurate "
+                    "(try the slider), but a better forecast still does not turn into less steam while no reserve wins.")
+        st.caption("SYNTHETIC: the model is trained and tested on synthetic years calibrated to the brief, so forecast "
+                   "errors mostly reflect the noise we injected. Replace with metered Fulton hot water data and NOAA "
+                   "weather before any real decision.")
     real = real_results()
     if real is not None:
         st.subheader("Tested on real metered data")
@@ -290,7 +330,7 @@ with tabs[2]:
         st.caption("Forecast error as WAPE (total absolute error / total load; lower is better), from "
                    "scripts/real_data_validation.py on Building Data Genome 2. Hourly metered dorm steam, which "
                    "includes space heating, so these are not NYCHA apartments. Trained on 2016, tested day-ahead on "
-                   "2017. The reserve-policy comparison above still uses synthetic data.")
+                   "2017." + ("" if real_mode else " The reserve-policy comparison above still uses synthetic data."))
 
 with tabs[3]:
     a, b, c, e = st.columns(4)
@@ -420,6 +460,9 @@ st.markdown(f"""
 
 with st.container(key="ask_widget"), st.popover(WIDGET_LABEL, icon=":material/water_drop:", key="ask_popover"):
     st.markdown("**Ask anything; I answer by running our model.**")
+    if real_mode:
+        st.caption("**Note:** the assistant always uses the SYNTHETIC demand data, not the real dorm load shape "
+                   "selected in the sidebar, so its numbers will not match the dashboard right now.")
     st.caption("Starts from your current sidebar settings. Demand and weather are SYNTHETIC, calibrated to the brief. "
                f"AI answers can be wrong: check the tools used. Powered by Claude ({assistant.MODEL}).")
     key = _api_key()
