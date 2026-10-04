@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#0f766e"               # single accent (teal), kept distinct from the chart series colors
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f5f7"   # sidebar and widget fills
+textColor = "#1f2937"
+borderColor = "#dfe3e8"
+showSidebarBorder = true
+font = "sans-serif"
+baseFontSize = 15
+headingFontSizes = ["1.6rem", "1.25rem", "1.05rem"]
+headingFontWeights = [700, 600, 600]
+metricValueFontSize = "1.55rem"
+baseRadius = "0.5rem"
