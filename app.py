@@ -1,11 +1,7 @@
 """Interactive judge demo: streamlit run app.py"""
-import altair as alt
-import numpy as np
-import pandas as pd
+import time
 import streamlit as st
-from heatsim.model import (synth_weather, synth_demand, outage_mask, Storage, simulate, summarize)
-from heatsim.forecast import train_and_forecast, reserve_policies, POLICY_NAMES
-from heatsim import finance as fin
+from intro import INTRO_HTML
 
 st.set_page_config(page_title="ChelseaHeat: Data Center Heat to NYCHA", layout="wide")
 st.markdown("""
@@ -24,6 +20,34 @@ st.markdown("""
   <span class="ch-badge" title="Demand and weather are synthetic profiles calibrated to the brief's figures; see README">SYNTHETIC DATA</span></div>
 <p class="ch-sub">Data center heat from 111 8th Ave, stored in a phase change battery, delivered to the Fulton Houses rebuild via Con Ed's Chelsea loop.</p>
 """, unsafe_allow_html=True)
+
+
+@st.cache_resource
+def first_load_state():
+    """Shared by all sessions in this server process: has the first-load work (imports, data, ML) finished?"""
+    return {"done": False}
+
+
+# Intro screen: once per session, and only when the first-load work is not already done (cached).
+intro = st.empty()
+intro_start = None
+if "intro_seen" not in st.session_state:
+    st.session_state.intro_seen = True
+    if not first_load_state()["done"]:
+        intro.markdown(INTRO_HTML, unsafe_allow_html=True)
+        intro_start = time.perf_counter()
+
+# Heavy imports (sklearn via heatsim.forecast) come after the intro so it covers them on a cold start
+import altair as alt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+from heatsim.model import (synth_weather, synth_demand, outage_mask, Storage, simulate, summarize)  # noqa: E402
+from heatsim.forecast import train_and_forecast, reserve_policies, POLICY_NAMES  # noqa: E402
+from heatsim import finance as fin  # noqa: E402
+import json  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+import assistant  # noqa: E402
+from assistant import ASSUMPTIONS_MD  # noqa: E402
 
 with st.sidebar:
     with st.expander("System", expanded=True):
@@ -123,6 +147,11 @@ f = fin.FinanceInputs(storage_cost_per_kwh=pcm_cost, pipe_cost_per_ft=pipe_cost,
 net = fin.network(s, capture, store.capacity_mwh, f)
 cust = fin.customer(f)
 imp = fin.impact(s, f)
+
+first_load_state()["done"] = True
+if intro_start is not None:
+    time.sleep(max(0.0, 1.0 - (time.perf_counter() - intro_start)))  # 1 s minimum so the animation doesn't flash
+    intro.empty()
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("DC heat share", f"{s['network_share']:.1%}", border=True,
@@ -265,11 +294,173 @@ with tabs[3]:
     st.metric("Water saved at cooling towers", f"{imp['water_gal_saved']/1e6:.1f}M gal/yr", border=True)
 
 with tabs[4]:
-    st.markdown("""
-- **Heat source:** 1.5 MW captured from one tenant's condenser loop at 111 8th Ave. ASSUMPTION; the building's cooling plant data is not public. Must be metered.
-- **Demand:** synthetic hourly hot water profile with the brief's 1.64 peak-to-average ratio, seasonal inlet temperature effect and random variation. Not metered data.
-- **Loop temperatures:** 54 to 97 F seasonal range and 10 F supply/return swing from the Con Ed Stage 2 filing; seasonal shape is our assumption. Condenser water at 90 F is our assumption.
-- **Storage:** salt hydrate (CaCl2.6H2O, ~84 F melt, ~50 kWh/m3 system density), 86% round trip, 1%/day standby loss. Charge/discharge power 2.5 MW by default, sized to peak demand (ASSUMPTION). Water tank comparison: 5.6 C swing on the loop side (brief), 87 to 65 F swing on the condenser side (ASSUMPTION).
-- **Costs:** capture $2.5M per 1.5 MW scaled with exponent 0.6; storage $120/kWh; pipe $6,000/ft x 1,200 ft; 25% soft costs; 30% ITC on storage; 6% over 30 years; O&M 2%/yr.
-- **Carbon:** NYC Local Law 97 2030 coefficients. **Water:** ~8,300 Btu per gallon evaporated, only if the plant uses cooling towers.
-""")
+    st.markdown(ASSUMPTIONS_MD.replace("$", r"\$"))  # escape $ so costs are not rendered as LaTeX
+
+EXAMPLES = ["What if the pipe is laid during the rebuild?", "Why not just use a water tank?",
+            "What happens if storage costs $80/kWh?"]
+
+
+def _api_key():
+    try:
+        return st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:  # no secrets file
+        return None
+
+
+def _md(text):
+    """Escape $ so dollar amounts are not rendered as LaTeX math."""
+    return text.replace("$", r"\$")
+
+
+def _submit_question(text=None):
+    """Button/chat callback (runs before the script, so a slider move cannot lose the question). The chat is
+    strictly turn-based: a message is accepted only when no answer is pending, and each example is sent once."""
+    ss = st.session_state
+    chat = ss.setdefault("chat", [])
+    if any(t["status"] == "pending" for t in chat) or ss.get("asked", 0) >= assistant.MAX_QUESTIONS:
+        return
+    if text is not None:  # example button
+        used = ss.setdefault("examples_used", set())
+        if text in used:
+            return
+        used.add(text)
+    q = (text if text is not None else ss.get("ask_input") or "").strip()[:assistant.MAX_INPUT_CHARS]
+    if q:
+        chat.append({"q": q, "status": "pending"})
+
+
+def _clear_chat():
+    if not any(t["status"] == "pending" for t in st.session_state.get("chat", [])):
+        st.session_state.chat = []
+
+
+def _show_calls(calls):
+    with st.expander(f"Tools used ({len(calls)} call{'s' if len(calls) != 1 else ''})"):
+        if not calls:
+            st.caption("No tools were called for this answer.")
+        for c in calls:
+            st.markdown(f"**{c['tool']}** `{json.dumps(c['input'])}`")
+            out = c.get("output")
+            if "error" in c:
+                st.warning(c["error"])
+            elif c["tool"] == "run_scenario":
+                st.dataframe(pd.DataFrame(out["kpis"].items(), columns=["KPI", "Value"]).astype(str), hide_index=True)
+            elif c["tool"] == "compare_scenarios":
+                st.dataframe(pd.DataFrame(out["rows"]).drop(columns="overrides").set_index("label").T.astype(str))
+            elif c["tool"] == "search_docs":
+                for h in out["results"]:
+                    st.caption(_md(f"{h['file']} / {h['section']}: {h['passage'][:200]}..."))
+                if not out["results"]:
+                    st.caption(out["note"])
+            else:
+                st.caption("Returned the assumption list, data provenance and current settings.")
+
+
+# Floating "Ask ChelseaHeat" chat widget, bottom right on every tab. The popover is keyed so it stays open (and
+# keeps its history) across reruns from sliders and its own buttons; tabs switch without a rerun at all.
+WIDGET_LABEL = "Ask ChelseaHeat"
+st.markdown(f"""
+<style>
+  .block-container {{padding-bottom: 6rem;}}  /* last content can scroll clear of the button */
+  .st-key-ask_widget {{position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 1000; width: auto !important;}}
+  .st-key-ask_widget button {{border-radius: 999px; padding: .55rem 1.1rem; background: #0f766e; color: #fff;
+      border: none; box-shadow: 0 4px 14px rgba(15, 118, 110, .35); font-weight: 600;}}
+  .st-key-ask_widget button:hover, .st-key-ask_widget button:focus {{background: #0c5f59; color: #fff;}}
+  /* Hot water droplet with two heat waves (inline SVG, white), drawn in the icon's slot */
+  .st-key-ask_widget span[data-has-shortcut] [data-testid="stIconMaterial"] {{font-size: 0; width: 1.3rem;
+      min-width: 1.3rem; height: 1.3rem; flex-shrink: 0; display: inline-block; background: center / contain no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 8.6c-2.9 3.6-5.8 6.5-5.8 9.6a5.8 5.8 0 0 0 11.6 0c0-3.1-2.9-6-5.8-9.6z' fill='white'/%3E%3Cpath d='M8.6 6.8c-1-1-1-1.9 0-2.8s1-1.9 0-2.8M15.4 6.8c-1-1-1-1.9 0-2.8s1-1.9 0-2.8' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E");}}
+  [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] {{
+      position: fixed !important; top: auto !important; left: auto !important; transform: none !important;
+      right: 1.25rem !important; bottom: 4.75rem !important; width: 380px !important;
+      max-width: calc(100vw - 2rem) !important; max-height: 70vh; overflow-y: auto; z-index: 1001;}}
+  /* Chat input: clearly active (white field, visible border, dark placeholder) */
+  [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] [data-testid="stChatInput"] {{
+      background: #fff !important; border: 1.5px solid #8a939e !important; border-radius: .6rem;}}
+  [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] [data-testid="stChatInput"]:focus-within {{
+      border-color: #0f766e !important; box-shadow: 0 0 0 3px rgba(15, 118, 110, .18);}}
+  [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] [data-testid="stChatInput"] * {{background-color: transparent;}}
+  [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] [data-testid="stChatInputTextArea"] {{color: #1f2937 !important;}}
+  [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] [data-testid="stChatInputTextArea"]::placeholder {{
+      color: #4b5563 !important; opacity: 1;}}
+  @media (max-width: 640px) {{
+    .st-key-ask_widget {{right: 1rem; bottom: 1rem;}}
+    [data-testid="stPopoverBody"][aria-label="{WIDGET_LABEL}"] {{right: 1rem !important; bottom: 4.25rem !important;}}
+  }}
+</style>""", unsafe_allow_html=True)
+
+with st.container(key="ask_widget"), st.popover(WIDGET_LABEL, icon=":material/water_drop:", key="ask_popover"):
+    st.markdown("**Ask anything; I answer by running our model.**")
+    st.caption("Starts from your current sidebar settings. Demand and weather are SYNTHETIC, calibrated to the brief. "
+               f"AI answers can be wrong: check the tools used. Powered by Claude ({assistant.MODEL}).")
+    key = _api_key()
+    if not key:
+        st.info("The assistant is unavailable right now (no API key configured). All of its numbers come from the "
+                "model shown on the tabs, so you can explore those directly.")
+    else:
+        ss = st.session_state
+        ss.setdefault("chat", [])  # turns: {"q", "status": pending | done | error, "a", "calls", "error"}
+        ss.setdefault("asked", 0)
+        ss.setdefault("examples_used", set())
+        left = assistant.MAX_QUESTIONS - ss.asked
+        busy = any(t["status"] == "pending" for t in ss.chat)
+        for i, q in enumerate(EXAMPLES):
+            if q not in ss.examples_used:  # each example can be asked once per session
+                st.button(q, key=f"ask_example_{i}", width="stretch", disabled=left <= 0 or busy,
+                          on_click=_submit_question, args=(q,))
+        log = st.container()
+        count_slot = st.empty()
+        st.chat_input("Thinking…" if busy else "Ask a question" if left > 0
+                      else "Question limit reached for this session", max_chars=assistant.MAX_INPUT_CHARS,
+                      disabled=left <= 0 or busy, key="ask_input", on_submit=_submit_question)
+        if ss.chat:
+            st.button("Clear chat", key="ask_clear", type="tertiary", icon=":material/delete_sweep:",
+                      disabled=busy, on_click=_clear_chat)
+        with log:
+            for t in ss.chat[:-1]:  # only the newest message may wait for an answer
+                if t["status"] == "pending":
+                    t.update(status="error", error="Not answered.")
+            for t in ss.chat:
+                st.chat_message("user").markdown(_md(t["q"]))
+                with st.chat_message("assistant"):
+                    if t["status"] == "done":
+                        st.markdown(_md(t["a"]))
+                        _show_calls(t["calls"])
+                    elif t["status"] == "error":
+                        st.error(t["error"])
+            turn = ss.chat[-1] if ss.chat else None
+            if turn and turn["status"] == "pending":
+                import anthropic
+                # API history: answered turns only, so it always alternates user/assistant and ends with this message
+                history = [{"q": t["q"], "a": t["a"]} for t in ss.chat[:-1] if t["status"] == "done"]
+                base = assistant.current_settings(
+                    capture_mw=capture, avg_demand_mw=avg, space_heat_share=sh, storage_kind=kind,
+                    storage_mwh=cap_mwh, storage_power_mw=store_mw, placement=placement, melt_f=melt,
+                    outage_hours=outage_h, reserve_policy=reserve_name, ride_through_h=ride,
+                    heat_price=heat_price, commercial_share=com_share, commercial_price=com_price,
+                    storage_cost_per_kwh=pcm_cost, pipe_cost_per_ft=pipe_cost, ratepayer_share=ratepayer,
+                    elec_price=elec, steam_price=steam, credit_floor_space=floor)
+                with st.chat_message("assistant"), st.spinner("Thinking…"):
+                    try:
+                        client = anthropic.Anthropic(api_key=key, timeout=60.0, max_retries=2)
+                        # Worker thread: Streamlit stops a superseded run at its next st.* call (the cached
+                        # base_data inside the tools is one). Waiting on the thread makes no st.* calls, so a
+                        # slider move mid-question cannot drop the answer.
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            out = pool.submit(assistant.ask, client, turn["q"], history, base, base_data).result()
+                        turn.update(status="done", a=out["answer"], calls=out["calls"])
+                        ss.asked += 1  # only answered questions count toward the session limit
+                    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
+                        turn.update(status="error", error="The assistant is unavailable right now (API key rejected).")
+                    except anthropic.RateLimitError:
+                        turn.update(status="error", error="The assistant is busy. Please try again in a minute.")
+                    except anthropic.APIStatusError as e:
+                        turn.update(status="error", error=f"The AI service returned an error ({e.status_code}). "
+                                                          "Please try again.")
+                    except anthropic.APIConnectionError:
+                        turn.update(status="error", error="Could not reach the AI service. Check the network and "
+                                                          "try again.")
+                    except Exception:
+                        turn.update(status="error", error="Something went wrong running the assistant. Please try again.")
+                st.rerun()  # redraw with the answer in place and the buttons and input enabled again
+        count_slot.caption(f"{assistant.MAX_QUESTIONS - ss.asked} of {assistant.MAX_QUESTIONS} questions left "
+                           "this session")
