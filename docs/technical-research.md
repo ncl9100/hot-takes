@@ -1,4 +1,4 @@
-# Technical Research Briefing (pointer)
+# Technical Research Briefing (pointer):
 
 Full briefing (living doc): https://claude.ai/code/artifact/41acf13d-d3d6-4ce7-bfdb-fb39585ce498
 Created 2026-10-03. Sections: data center fundamentals, heat recovery chain, applications, engineering challenges, software/DS opportunities, environmental and economic impact (NYC worked example), New York context, deployments, open problems, glossary, equations, knowledge gaps, 15 study questions.
