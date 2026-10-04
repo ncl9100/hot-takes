@@ -53,3 +53,5 @@ Defaults: 1.5 MW capture, 1.0 MW average demand, 12 MWh PCM on the condenser sid
 ## Team
 
 3-person team, NYU Sustainable Data Center Hackathon 2026.
+
+Built with help from [Claude Code](https://claude.com/claude-code) for the simulation, app and dashboard design.
