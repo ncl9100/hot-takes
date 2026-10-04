@@ -2,6 +2,7 @@
 
 NYU Sustainable Data Center Hackathon, Grundfos Waste Heat Reuse Challenge (Site 1: 111 8th Avenue).
 
+
 **Live demo:** [hot-takes.streamlit.app](https://hot-takes.streamlit.app/)
 
 **The problem:** a data center makes heat around the clock and sends most of it to rooftop cooling towers, while apartment buildings need hot water in morning and evening peaks. Steady supply and peaky demand don't line up, so heat is thrown away at night and Con Ed steam covers the peaks.
