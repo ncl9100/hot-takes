@@ -2,6 +2,8 @@
 
 NYU Sustainable Data Center Hackathon, Grundfos Waste Heat Reuse Challenge (Site 1: 111 8th Avenue).
 
+**Live demo:** [hot-takes.streamlit.app](https://hot-takes.streamlit.app/)
+
 We propose a phase change thermal battery at 111 8th Avenue that feeds data center heat into Con Edison's Chelsea thermal energy network, serving hot water to the rebuilt Fulton Houses on residents' schedule instead of the servers'. This repo is the decision tool behind that proposal: it tests the design hour by hour instead of relying on spreadsheet averages.
 
 ## What it does
@@ -13,6 +15,8 @@ We propose a phase change thermal battery at 111 8th Avenue that feeds data cent
 5. **Interactive app** (`app.py`) where every assumption is a slider.
 
 ## Run it
+
+Use the [live demo](https://hot-takes.streamlit.app/), or run it locally:
 
 ```bash
 pip install -r requirements.txt
