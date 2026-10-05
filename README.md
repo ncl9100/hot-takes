@@ -86,6 +86,9 @@ assistant.py            "Ask ChelseaHeat" assistant: tools, system prompt, assum
 heatsim/model.py        Synthetic weather and demand, outages, storage physics, hourly dispatch
 heatsim/forecast.py     Day-ahead demand forecast and outage reserve policies
 heatsim/finance.py      Capex, NPV, cost of heat, customer bills, CO2, water
+heatsim/realdata.py     Loads the real dorm load shape (optional sidebar choice)
+scripts/real_data_validation.py  Forecast test on real BDG2 dorm steam meters
+data/                   Real-data results (raw downloads in data/raw/ are gitignored)
 docs/                   Team research brief, organizer materials review, judging criteria,
                         technical research, slide numbers
 .streamlit/config.toml  Dashboard theme
@@ -120,6 +123,28 @@ Defaults: 1.5 MW capture, 1.0 MW average demand, 12 MWh PCM on the condenser sid
 - Heat source size (1.5 MW) and condenser water temperature (90 F) are assumptions that must be confirmed by metering, as Con Ed did at 85 10th Avenue.
 - All costs are planning estimates from cited benchmarks in `docs/`, not quotes.
 - The assistant does not add data of its own: it is instructed to quote only numbers from model runs or passages in `docs/`, and it shows its tool calls so each answer can be checked.
+
+## Real-data validation
+
+We tested the forecast model in `heatsim/forecast.py` (same features, same gradient-boosted regressor) on real hourly metered steam from dorm buildings ("Lodging/residential") at two US Eastern-time sites in Building Data Genome 2 (BDG2), the open release of the ASHRAE Great Energy Predictor III data. We trained on 2016 and forecast 2017 one day ahead. Error is WAPE (total absolute error divided by total load; lower is better).
+
+| Series | Our ML | Same as yesterday | Hour-of-day profile |
+|---|---|---|---|
+| Cockatoo site, 7 dorm meters summed | 0.180 | 0.243 | 0.388 |
+| Eagle site, 3 dorm meters summed | 0.304 | 0.350 | 0.363 |
+| Median of the 10 individual dorms | 0.297 | 0.330 | 0.429 |
+
+Caveats:
+- This is dorm steam, which includes space heating. It is not NYCHA apartment hot water, and no metered data for the Fulton Houses was used.
+- WAPE on real data is not comparable with the 8.5% MAPE on our synthetic year. Real loads are much harder to forecast than our synthetic ones.
+- The ML model beats both baselines on the summed series and on the median dorm, but loses to the hour-of-day profile on 3 of the 10 individual dorms. On this real data, same-as-yesterday beats the hour-of-day profile, the reverse of our synthetic result.
+- The reserve-policy results above still use synthetic data.
+
+Reproduce with `.venv\Scripts\python scripts/real_data_validation.py`. It downloads the raw BDG2 files into `data/raw/` (gitignored, never committed) and writes `data/real_steam_results.csv`, which the app's ML tab reads. The app itself never downloads or trains on this data.
+
+**Run the model on a real load shape.** The sidebar's "Demand data" choice switches from the synthetic default to "Real metered shape (BDG2 dorms)": hourly summed steam for the 7 Cockatoo dorms in 2017, with that site's air temperature, rescaled to the average-demand slider (our assumption: the shape scales linearly). The forecast then trains on the same dorms' 2016 data. This is dorm heating plus hot water, not NYCHA data, so results differ from the synthetic numbers above, which are what our deck and this README quote. The data is in `data/real_demand_cockatoo.csv` (gaps filled as described in the script; a `filled` column marks them). The "Ask ChelseaHeat" assistant always uses the synthetic data.
+
+Dataset: Miller, C., Kathirgamanathan, A., Picchetti, B. et al. *The Building Data Genome Project 2, energy meter data from the ASHRAE Great Energy Predictor III competition.* Sci Data 7, 368 (2020). https://doi.org/10.1038/s41597-020-00712-x. Data from [github.com/buds-lab/building-data-genome-project-2](https://github.com/buds-lab/building-data-genome-project-2), licensed CC BY-SA (Creative Commons Attribution-ShareAlike; see that repo's LICENSE). Files in `data/` derived from it are shared under the same license.
 
 ## Limitations
 
